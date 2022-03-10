@@ -10,31 +10,32 @@ var Component = require("pixl-server/component");
 var CouchbaseAPI = require('couchbase');
 var Tools = require("pixl-tools");
 
-module.exports = Class.create({
-	
-	__name: 'Couchbase',
-	__parent: Component,
-	
-	defaultConfig: {
+class Couchbase extends Component {
+	defaultConfig = {
 		connectString: "couchbase://127.0.0.1",
 		bucket: "default",
 		password: "",
 		serialize: false,
 		keyPrefix: "",
 		keyTemplate: ""
-	},
-	
-	startup: function(callback) {
+	}
+
+	cluster;
+	bucket;
+	thingy;
+
+	async startup(callback) {
 		// setup Couchbase connection
 		var self = this;
 		this.logDebug(2, "Setting up Couchbase", 
 			Tools.copyHashRemoveKeys( this.config.get(), { password:1 }) );
 		
-		this.setup(callback);
+		await this.setup(callback);
 		// this.config.on('reload', function() { self.setup(); } );
-	},
-	
-	setup: function(callback) {
+		callback();
+	}
+
+	async setup(callback) {
 		// setup Couchbase connection
 		var self = this;
 		
@@ -44,34 +45,40 @@ module.exports = Class.create({
 		this.keyTemplate = this.config.get('keyTemplate').replace(/^\//, '').replace(/\/$/, '');
 		
 		
-		
 		if (this.config.get('username') && this.config.get('password')) {
 			// Temporary deprecation fix
 			// support old legacy naming convention: connect_string
-			this.cluster = new CouchbaseAPI.Cluster( this.config.get('connectString') || this.config.get('connect_string'), {
-				username: this.config.get('username'),
-				password: this.config.get('password')
-			} );
+			let connectString = self.config.get('connectString') || self.config.get('connect_string')
+			console.log(connectString);
+			self.cluster = await CouchbaseAPI.connect( connectString, {
+				username: self.config.get('username'),
+				password: self.config.get('password')
+			} ).catch(err => {
+				console.log(err.code);
+				if(err.code == 1004) {
+					self.logError('couchbase', 'Failed to login to the Couchbase server. Are your user permissions correct?');
+					err.message = 'Failed to login to the Couchbase server. Are your user permissions correct?'
+					callback( err, null );
+				} else {
+					self.logError('couchbase', `ERR: ${err}`);
+					callback(err, null);
+				}
+			});
 			
-			this.bucket = this.cluster.bucket( this.config.get('bucket'), function(err) {
-				callback(err);
-			} );
+			console.log(self.cluster);
+
+			console.log(self.config.get('bucket'));
+
+			this.thingy = self.cluster.bucket( self.config.get('bucket'));
+			this.bucket = this.thingy.defaultCollection();
+
+			console.log(this.bucket);
+
+			
 		}
-		else if (!this.config.get('username') && this.config.get('password')) {
-			// couchbase 2.0 old auth style
-			this.bucket = this.cluster.openBucket( this.config.get('bucket'), this.config.get('password'), function(err) {
-				callback(err);
-			} );
-		}
-		else {
-			// no auth
-			this.bucket = this.cluster.openBucket( this.config.get('bucket'), function(err) {
-				callback(err);
-			} );
-		}
-	},
-	
-	prepKey: function(key) {
+	}
+
+	prepKey(key) {
 		// prepare key for S3 based on config
 		var md5 = Tools.digestHex(key, 'md5');
 		
@@ -82,15 +89,15 @@ module.exports = Class.create({
 		if (this.keyTemplate) {
 			var idx = 0;
 			var temp = this.keyTemplate.replace( /\#/g, function() {
-				return md5.substr(idx++, 1);
+				return md5.substring(idx++, 1);
 			} );
 			key = Tools.substitute( temp, { key: key, md5: md5 } );
 		}
 		
 		return key;
-	},
-	
-	put: function(key, value, callback) {
+	}
+
+	put(key, value, callback) {
 		// store key+value in Couchbase
 		var self = this;
 		key = this.prepKey(key);
@@ -112,9 +119,8 @@ module.exports = Class.create({
 			
 			if (callback) callback(err);
 		} );
-	},
-	
-	putStream: function(key, inp, callback) {
+	}
+	putStream(key, inp, callback) {
 		// store key+value in Couchbase using read stream
 		var self = this;
 		
@@ -129,9 +135,9 @@ module.exports = Class.create({
 			var buf = Buffer.concat(chunks);
 			self.put( key, buf, callback );
 		} );
-	},
+	}
 	
-	head: function(key, callback) {
+	head(key, callback) {
 		// head couchbase value given key
 		var self = this;
 		
@@ -157,9 +163,9 @@ module.exports = Class.create({
 				callback( null, { mod: 1, len: data.length } );
 			}
 		} );
-	},
+	}
 	
-	get: function(key, callback) {
+	get(key, callback) {
 		// fetch Couchbase value given key
 		var self = this;
 		key = this.prepKey(key);
@@ -168,7 +174,7 @@ module.exports = Class.create({
 		
 		this.bucket.get( key, function(err, result) {
 			if (!result) {
-				if (err && (err.code != CouchbaseAPI.errors.keyNotFound)) {
+				if (err && (err.code != CouchbaseAPI.DocumentNotFoundError)) {
 					// some other error
 					err.message = "Failed to fetch key: " + key + ": " + err.message;
 					self.logError('couchbase', err.message);
@@ -204,16 +210,16 @@ module.exports = Class.create({
 				callback( null, body );
 			}
 		} );
-	},
+	}
 	
-	getStream: function(key, callback) {
+	getStream(key, callback) {
 		// get readable stream to record value given key
 		var self = this;
 		
 		// The Couchbase Node.JS 2.0 API has no stream support.
 		// So, we have to do this the RAM-hard way...
 		this.get( key, function(err, buf) {
-			if (err && (err.code != CouchbaseAPI.errors.keyNotFound)) {
+			if (err && (err.code != CouchbaseAPI.DocumentNotFoundError)) {
 				// some other error
 				err.message = "Failed to fetch key: " + key + ": " + err.message;
 				self.logError('couchbase', err.message);
@@ -229,16 +235,16 @@ module.exports = Class.create({
 			var stream = new BufferStream(buf);
 			callback(null, stream, { mod: 1, len: buf.length });
 		} );
-	},
+	}
 	
-	getStreamRange: function(key, start, end, callback) {
+	getStreamRange(key, start, end, callback) {
 		// get readable stream to record value given key and range
 		var self = this;
 		
 		// The Couchbase Node.JS 2.0 API has no stream support.
 		// So, we have to do this the RAM-hard way...
 		this.get( key, function(err, buf) {
-			if (err && (err.code != CouchbaseAPI.errors.keyNotFound)) {
+			if (err && (err.code != CouchbaseAPI.DocumentNotFoundError)) {
 				// some other error
 				err.message = "Failed to fetch key: " + key + ": " + err.message;
 				self.logError('couchbase', err.message);
@@ -269,9 +275,9 @@ module.exports = Class.create({
 			var stream = new BufferStream(range);
 			callback(null, stream, { mod: 1, len: buf.length });
 		} );
-	},
+	}
 	
-	delete: function(key, callback) {
+	delete(key, callback) {
 		// delete Couchbase key given key
 		// Example CB error message: The key does not exist on the server
 		var self = this;
@@ -282,7 +288,7 @@ module.exports = Class.create({
 		this.bucket.remove( key, {}, function(err) {
 			if (err) {
 				// if error was a non-existent key, make sure we use the standard code
-				if (err.code == CouchbaseAPI.errors.keyNotFound) err.code = "NoSuchKey";
+				if (err.code == CouchbaseAPI.DocumentNotFoundError) err.code = "NoSuchKey";
 				
 				self.logError('couchbase', "Failed to delete object: " + key + ": " + err.message);
 			}
@@ -290,21 +296,20 @@ module.exports = Class.create({
 			
 			callback(err);
 		} );
-	},
-	
-	runMaintenance: function(callback) {
-		// run daily maintenance
-		callback();
-	},
-	
-	shutdown: function(callback) {
-		// shutdown storage
-		this.logDebug(2, "Shutting down Couchbase");
-		this.bucket.disconnect();
-		callback();
 	}
 	
-});
+	runMaintenance(callback) {
+		// run daily maintenance
+		callback();
+	}
+
+	shutdown(callback) {
+		// shutdown storage
+		this.logDebug(2, "Shutting down Couchbase");
+		this.cluster.close()
+		callback();
+	}
+}
 
 // Modified the following snippet from node-streamifier:
 // Copyright (c) 2014 Gabriel Llamas, MIT Licensed
@@ -331,3 +336,5 @@ BufferStream.prototype._read = function () {
 	this.push(this._object);
 	this._object = null;
 };
+
+module.exports = Couchbase;
