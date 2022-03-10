@@ -43,14 +43,17 @@ module.exports = Class.create({
 		
 		this.keyTemplate = this.config.get('keyTemplate').replace(/^\//, '').replace(/\/$/, '');
 		
-		// support old legacy naming convention: connect_string
-		this.cluster = new CouchbaseAPI.Cluster( this.config.get('connectString') || this.config.get('connect_string') );
+		
 		
 		if (this.config.get('username') && this.config.get('password')) {
-			// couchbase 2.5+ new auth style
-			this.cluster.authenticate(this.config.get('username'), this.config.get('password'));
+			// Temporary deprecation fix
+			// support old legacy naming convention: connect_string
+			this.cluster = new CouchbaseAPI.Cluster( this.config.get('connectString') || this.config.get('connect_string'), {
+				username: this.config.get('username'),
+				password: this.config.get('password')
+			} );
 			
-			this.bucket = this.cluster.openBucket( this.config.get('bucket'), function(err) {
+			this.bucket = this.cluster.bucket( this.config.get('bucket'), function(err) {
 				callback(err);
 			} );
 		}
